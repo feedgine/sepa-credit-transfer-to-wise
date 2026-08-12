@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="sl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SEPA → Wise pretvornik</title>
+<style>
+  :root { --green:#163300; --lime:#9fe870; --bg:#f7f7f5; --err:#c0392b; --line:#e2e2dd; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         margin:0; background:var(--bg); color:#111; line-height:1.5; }
+  .wrap { max-width:920px; margin:0 auto; padding:32px 20px 80px; }
+  h1 { font-size:1.6rem; margin:0 0 4px; }
+  .sub { color:#555; margin:0 0 24px; }
+  .privacy { background:#eef7e6; border:1px solid #cfe8b8; border-radius:12px;
+             padding:12px 16px; font-size:.9rem; margin-bottom:24px; }
+  .privacy b { color:var(--green); }
+  .drop { border:2px dashed #bcbcb4; border-radius:16px; background:#fff;
+          padding:40px 20px; text-align:center; cursor:pointer; transition:.15s; }
+  .drop.over { border-color:var(--green); background:#f3f9ec; }
+  .drop input { display:none; }
+  .drop p { margin:6px 0; color:#555; }
+  .btn { display:inline-block; background:var(--lime); color:var(--green); border:none;
+         border-radius:24px; padding:12px 24px; font-size:1rem; font-weight:600;
+         cursor:pointer; text-decoration:none; }
+  .btn:disabled { opacity:.4; cursor:default; }
+  .btn.secondary { background:#fff; border:1px solid var(--line); }
+  .summary { margin:24px 0 12px; padding:16px; background:#fff; border:1px solid var(--line);
+             border-radius:12px; }
+  .summary.ok  { border-left:5px solid var(--lime); }
+  .summary.bad { border-left:5px solid var(--err); }
+  .row-actions { display:flex; gap:12px; margin:16px 0; flex-wrap:wrap; }
+  table { width:100%; border-collapse:collapse; background:#fff; font-size:.82rem;
+          border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  th, td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--line);
+           white-space:nowrap; }
+  th { background:#f0f0ec; font-weight:600; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .tag { font-size:.7rem; padding:2px 7px; border-radius:10px; }
+  .tag.BUSINESS { background:#e6eefc; color:#1f4fa3; }
+  .tag.PERSON   { background:#f0e6fc; color:#6a2fa3; }
+  .warn { color:var(--err); font-size:.85rem; margin-top:12px; }
+  .scroll { overflow-x:auto; }
+  .hidden { display:none; }
+  footer { margin-top:40px; font-size:.8rem; color:#888; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SEPA → Wise pretvornik</h1>
+  <p class="sub">pain.001.001.03 XML → Wise batch CSV. Obvezni sklic pri plačilu davkov se ohrani v polju Reference.</p>
+
+  <div class="privacy">
+    🔒 <b>Vse se dogaja v vašem brskalniku.</b> Datoteka se ne naloži na noben strežnik in se nikjer ne shrani.
+    Če stran zaprete, ni sledi. (Delo brez interneta: shranite to stran in jo odprite lokalno.)
+  </div>
+
+  <label class="drop" id="drop">
+    <input type="file" id="file" accept=".xml">
+    <p style="font-size:1.1rem;color:#111"><b>Kliknite ali povlecite SEPA XML sem</b></p>
+    <p>datoteka .xml iz računovodskega programa</p>
+  </label>
+
+  <div id="result" class="hidden">
+    <div class="summary" id="summary"></div>
+    <div class="row-actions">
+      <button class="btn" id="download">⬇ Prenesi CSV</button>
+      <button class="btn secondary" id="reset">Nova datoteka</button>
+    </div>
+    <div id="warns"></div>
+    <div class="scroll"><table id="table"></table></div>
+  </div>
+
+  <footer>
+    amountCurrency = target (prejemnik dobi točen znesek). receiverType se določi po Purp in imenu.<br>
+    Opozorilo: Wise pošlje referenco kot nestrukturirano besedilo — davčna plačila so varnejša prek slovenske banke.
+  </footer>
+</div>
+
+<script>
+// ---- Konfiguracija razvrstitve (enako kot v sepa_to_wise.py) --------------
+const BUSINESS_PURP = new Set(["TAXS","SUPP","VATX","GOVT","SSBE"]);
+const PERSON_PURP   = new Set(["SALA","PRCP","REFU","BONU","PENS"]);
+const BUSINESS_NAME_RE = /\b(d\.?o\.?o\.?|d\.?d\.?|s\.?p\.?|PODRACUN|PRORACUN|ZZZS|ZPIZ|FURS|DAVCNI|ACCOUNTING|d\.n\.o\.|k\.d\.)\b/i;
+const SI_MODEL_RE = /^SI\d{2}/;
+
+const FIELDS = ["name","recipientEmail","paymentReference","receiverType",
+                "amountCurrency","amount","sourceCurrency","targetCurrency","IBAN"];
+
+// Vzame prvi podelement z danim lokalnim imenom (brez namespace).
+function child(el, name){
+  for (const c of el.children) if (c.localName === name) return c;
+  return null;
+}
+// Sledi poti "A/B/C" po lokalnih imenih.
+function pick(el, path){
+  let cur = el;
+  for (const part of path.split("/")){
+    if (!cur) return null;
+    cur = child(cur, part);
+  }
+  return cur;
+}
+function pickText(el, path){
+  const n = pick(el, path);
+  return n && n.textContent ? n.textContent.trim() : "";
+}
+
+function formatReference(ref, addtl){
+  ref = (ref||"").trim(); addtl = (addtl||"").trim();
+  if (SI_MODEL_RE.test(ref)){
+    const model = ref.slice(0,4), rest = ref.slice(4);
+    return { ref:(model+" "+rest).trim(), mandatory:true };
+  }
+  if (addtl) return { ref:addtl, mandatory:false };
+  return { ref, mandatory:false };
+}
+
+function receiverType(name, purp){
+  purp = (purp||"").toUpperCase();
+  if (BUSINESS_PURP.has(purp)) return "BUSINESS";
+  if (BUSINESS_NAME_RE.test(name||"")) return "BUSINESS";
+  if (PERSON_PURP.has(purp)) return "PERSON";
+  return "PERSON";
+}
+
+function convert(xmlText){
+  const doc = new DOMParser().parseFromString(xmlText, "application/xml");
+  if (doc.querySelector("parsererror")) throw new Error("Datoteka ni veljaven XML.");
+
+  const rows = [], warnings = [];
+  let total = 0;
+
+  // Vsi CdtTrfTxInf ne glede na namespace.
+  const txs = [...doc.getElementsByTagName("*")].filter(e => e.localName === "CdtTrfTxInf");
+  for (const tx of txs){
+    let name = pickText(tx, "Cdtr/Nm").replace(/\s+/g," ").trim();
+    const iban = pickText(tx, "CdtrAcct/Id/IBAN").replace(/\s+/g,"");
+    const amtNode = pick(tx, "Amt/InstdAmt");
+    const amount = amtNode ? amtNode.textContent.trim() : "0";
+    const ccy = (amtNode && amtNode.getAttribute("Ccy")) || "EUR";
+    const purp = pickText(tx, "Purp/Cd");
+    const ref  = pickText(tx, "RmtInf/Strd/CdtrRefInf/Ref");
+    const addtl= pickText(tx, "RmtInf/Strd/AddtlRmtInf");
+
+    const { ref:reference, mandatory } = formatReference(ref, addtl);
+    const rtype = receiverType(name, purp);
+
+    rows.push({ name, recipientEmail:"", paymentReference:reference, receiverType:rtype,
+                amountCurrency:"target", amount, sourceCurrency:ccy, targetCurrency:ccy, IBAN:iban });
+    const v = parseFloat(amount); if (!isNaN(v)) total += v;
+    if (mandatory) warnings.push(`${name}: ${reference}`);
+  }
+
+  // Kontrolna vsota iz GrpHdr.
+  let ctrl = null;
+  for (const e of doc.getElementsByTagName("*"))
+    if (e.localName === "CtrlSum" && e.textContent){ ctrl = e.textContent.trim(); break; }
+
+  return { rows, warnings, total, ctrl };
+}
+
+// ---- CSV -------------------------------------------------------------------
+function toCSV(rows){
+  const esc = v => /[",\n]/.test(v) ? '"'+String(v).replace(/"/g,'""')+'"' : v;
+  const lines = [FIELDS.join(",")];
+  for (const r of rows) lines.push(FIELDS.map(f => esc(r[f]??"")).join(","));
+  return lines.join("\n")+"\n";
+}
+
+// ---- UI --------------------------------------------------------------------
+let currentRows = null, currentName = "wise.csv";
+
+const drop = document.getElementById("drop");
+const fileInput = document.getElementById("file");
+const resultBox = document.getElementById("result");
+
+function render(res, fileName){
+  currentRows = res.rows;
+  currentName = fileName.replace(/\.xml$/i,"") + "-wise.csv";
+
+  const cur = res.rows[0] ? res.rows[0].sourceCurrency : "";
+  const sum = res.total.toFixed(2);
+  const s = document.getElementById("summary");
+  let ctrlLine = "";
+  let ok = true;
+  if (res.ctrl !== null){
+    ok = Math.abs(res.total - parseFloat(res.ctrl)) < 0.005;
+    ctrlLine = `<br>CtrlSum: <b>${res.ctrl}</b> — ${ok ? "✓ ujema se" : "✗ ODSTOPANJE!"}`;
+  }
+  s.className = "summary " + (ok ? "ok" : "bad");
+  s.innerHTML = `Plačil: <b>${res.rows.length}</b>&nbsp;&nbsp; Vsota: <b>${sum} ${cur}</b>${ctrlLine}`;
+
+  const w = document.getElementById("warns");
+  if (res.warnings.length){
+    w.innerHTML = `<div class="warn">⚠ Obvezni davčni sklici (preverite razporeditev / raje plačajte prek slovenske banke):<br>`
+      + res.warnings.map(x=>"• "+x).join("<br>") + `</div>`;
+  } else w.innerHTML = "";
+
+  const cols = ["name","paymentReference","receiverType","amount","IBAN"];
+  const head = "<tr>"+cols.map(c=>`<th>${c}</th>`).join("")+"</tr>";
+  const body = res.rows.map(r=>"<tr>"+cols.map(c=>{
+    if (c==="receiverType") return `<td><span class="tag ${r[c]}">${r[c]}</span></td>`;
+    if (c==="amount") return `<td class="num">${r[c]}</td>`;
+    return `<td>${r[c]||""}</td>`;
+  }).join("")+"</tr>").join("");
+  document.getElementById("table").innerHTML = head+body;
+
+  resultBox.classList.remove("hidden");
+}
+
+function handleFile(file){
+  const reader = new FileReader();
+  reader.onload = e => {
+    try { render(convert(e.target.result), file.name); }
+    catch(err){ alert("Napaka: "+err.message); }
+  };
+  reader.readAsText(file);
+}
+
+fileInput.addEventListener("change", e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
+["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) handleFile(f); });
+
+document.getElementById("download").addEventListener("click", () => {
+  if (!currentRows) return;
+  const blob = new Blob([toCSV(currentRows)], {type:"text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = currentName;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+document.getElementById("reset").addEventListener("click", () => {
+  currentRows = null; fileInput.value = ""; resultBox.classList.add("hidden");
+});
+</script>
+</body>
+</html>
