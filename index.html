@@ -117,7 +117,7 @@
 const BUSINESS_PURP = new Set(["TAXS","SUPP","VATX","GOVT","SSBE","LBRI"]);
 const PERSON_PURP   = new Set(["SALA","PRCP","REFU","BONU","PENS"]);
 const BUSINESS_NAME_RE = /\b(d\.?o\.?o\.?|d\.?d\.?|s\.?p\.?|PODRACUN|PRORACUN|ZZZS|ZPIZ|FURS|DAVCNI|ACCOUNTING|d\.n\.o\.|k\.d\.)\b/i;
-const SI_STRUCTURED_RE = /^SI(\d{2})(.+)$/;
+const SI_STRUCTURED_RE = /^SI(\d{2})(.*)$/;
 const RF_STRUCTURED_RE = /^RF\d{2}.{3,}$/;
 const TAX_MODELS = new Set(["19"]);
 
@@ -145,12 +145,13 @@ function pickText(el, path){
 function buildReferences(ref, addtl){
   ref = (ref||"").trim(); addtl = (addtl||"").trim();
   const m = SI_STRUCTURED_RE.exec(ref);
-  if (m && m[1] !== "99"){
+  if (m){
     if (TAX_MODELS.has(m[1])) return { pay:ref, num:ref, tax:true };
+    // SI99 ("brez sklica") in ostali SI-sklici → ref v referenceNumber
     return { pay:addtl, num:ref, tax:false };
   }
-  if (RF_STRUCTURED_RE.test(ref)) return { pay:addtl, num:ref, tax:false };
-  return { pay:(addtl||ref), num:"", tax:false };
+  if (RF_STRUCTURED_RE.test(ref)) return { pay:addtl, num:ref, tax:false };  // realen RF
+  return { pay:(addtl||ref), num:"", tax:false };  // RF040 / prazno
 }
 
 function receiverType(name, purp){

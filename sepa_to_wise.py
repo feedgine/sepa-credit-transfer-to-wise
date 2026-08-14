@@ -81,8 +81,9 @@ BUSINESS_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Slovenski model + številka sklica: SI<2 številki><preostanek>.
-SI_STRUCTURED_RE = re.compile(r"^SI(\d{2})(.+)$")
+# Slovenski model sklica: SI<2 številki>(<preostanek>). Preostanek je lahko
+# prazen (npr. "SI99" = brez sklica).
+SI_STRUCTURED_RE = re.compile(r"^SI(\d{2})(.*)$")
 # ISO 11649 kreditna referenca (realna, ne kratek nadomestek kot 'RF040'):
 RF_STRUCTURED_RE = re.compile(r"^RF\d{2}.{3,}$")
 # Model 19 = davki/prispevki (FURS: sklic brez besedila in brez presledkov).
@@ -124,25 +125,28 @@ def build_references(ref: str, addtl: str):
     - Davčni sklic (model SI19): sklic gre v OBA polja (referenceNumber IN
       paymentReference), oba brez presledkov in brez dodatnega besedila —
       ker vnaprej ne vemo, katero polje Wise posreduje naprej FURS-u.
-    - Drug strukturiran sklic (SI00/SI01/SI11..., RF...): referenceNumber = ref,
+    - Vsak SI-sklic (SI99 = "brez sklica", SI00/SI01/... = strukturiran):
+      referenceNumber = ref verbatim (zvestoba viru iz Minimaxa),
       paymentReference = opis (AddtlRmtInf).
-    - Model SI99 ali nadomestek (RF040) ali brez sklica: referenceNumber = "",
+    - Realen RF sklic (RF + kontrolni + številka): referenceNumber = ref,
+      paymentReference = opis.
+    - Nadomestek 'RF040' / prazno / drugo: referenceNumber = "",
       paymentReference = opis (npr. 'Placa (7/26) ...').
     """
     ref = (ref or "").strip()
     addtl = (addtl or "").strip()
 
     m = SI_STRUCTURED_RE.match(ref)
-    if m and m.group(1) != "99":
-        model = m.group(1)
-        if model in TAX_MODELS:
-            return ref, ref, True          # davek: sklic v obeh poljih
-        return addtl, ref, False          # npr. račun dobavitelja (SI00)
-
-    if RF_STRUCTURED_RE.match(ref):
+    if m:
+        if m.group(1) in TAX_MODELS:
+            return ref, ref, True          # davek (SI19): sklic v obeh poljih
+        # SI99 in ostali SI-sklici: ref v referenceNumber (zvestoba viru)
         return addtl, ref, False
 
-    # SI99 / RF040 / prazno — ni strukturiranega sklica.
+    if RF_STRUCTURED_RE.match(ref):        # realen RF (ne kratek 'RF040')
+        return addtl, ref, False
+
+    # RF040 / prazno / drugo — ni strukturiranega sklica.
     return (addtl or ref), "", False
 
 

@@ -51,11 +51,14 @@ without extra text**, in the dedicated reference field. So:
   chance FURS can allocate the payment automatically. Since the value carries no
   extra text, duplicating it does not violate FURS's "no text before the reference"
   rule.
-- **Other structured references** (SI00/SI01/SI11…, real RF…) → `referenceNumber`
-  gets the reference, `paymentReference` keeps the description (e.g. an invoice note).
-- **No structured reference** (model SI99, placeholder like `RF040`, or none) →
-  `referenceNumber` empty, `paymentReference` gets the description
-  (e.g. `Placa (7/26) …`).
+- **Any other SI reference** — a real structured one (SI00/SI01/SI11…) **or**
+  model **SI99** ("no reference" in Slovenian) → passed through verbatim to
+  `referenceNumber` (source fidelity), `paymentReference` keeps the description
+  (e.g. an invoice note or `Placa (7/26) …`).
+- **Real RF reference** (RF + check digits + number) → `referenceNumber` gets it,
+  `paymentReference` keeps the description.
+- **Placeholder `RF040` / none** → `referenceNumber` empty, `paymentReference`
+  gets the description.
 
 > FURS guidance (paraphrased): the reference must be written as e.g.
 > `SI1948539619-44008`, with no extra text and no spaces; if text is unavoidable it
