@@ -4,59 +4,103 @@ sepa_to_wise.py — pretvornik SEPA pain.001.001.03 XML v Wise batch CSV.
 
 Namen:
   Vzame plačilni XML (plače + davki/prispevki + računi dobaviteljev),
-  izvožen iz računovodskega programa, in ga pretvori v CSV, ki ga je
-  mogoče naložiti v Wise kot paketno plačilo (batch payment).
+  izvožen iz računovodskega programa (npr. Minimax), in ga pretvori v CSV,
+  ki ga je mogoče naložiti v Wise kot paketno plačilo (batch payment).
+
+Izhodni format:
+  Wise predloga "Send to bank accounts" (Send-to-bank-accounts.csv), varianta
+  za NOVEGA prejemnika (10 stolpcev, s stolpcem IBAN). To NI predloga
+  "All recipients" (ta ima recipientId/recipientDetail za obstoječe prejemnike).
 
 Bistveno:
-  Obvezni slovenski sklic (referenca z modelom SIxx) pri plačilu davkov
-  se ohrani v polju paymentReference — brez njega plačila v proračun
-  ni mogoče razporediti.
+  Obvezni slovenski sklic (referenca z modelom SIxx) pri plačilu davkov se
+  zapiše v ločeni STRUKTURIRANI stolpec `referenceNumber` — brez presledkov
+  in brez dodatnega besedila, kot zahteva FURS. Prosto besedilo (opis) gre
+  v `paymentReference`.
+
+Avtor / kontakt:
+  Egor Zyryanov, Setronica d.o.o. — contact@setronica.si
 
 Uporaba:
   python3 sepa_to_wise.py vhod.xml [izhod.csv]
-  # če izhod.csv ni podan, se ime tvori samodejno: <vhod>-wise.csv
-
-  # več datotek naenkrat:
   python3 sepa_to_wise.py datoteka1.xml datoteka2.xml
 
 Opombe:
+  * Wise predloga za NOVEGA prejemnika ima 10 stolpcev:
+    name, recipientEmail, paymentReference, referenceNumber, receiverType,
+    amountCurrency, amount, sourceCurrency, targetCurrency, IBAN
   * amountCurrency = "target" — prejemnik dobi točen znesek (InstdAmt).
-  * receiverType se določi po namenski kodi (Purp) in imenu prejemnika.
-  * Wise pošlje referenco kot NESTRUKTURIRANO polje remittance.
-    Slovenska davčna običajno pričakuje sklic v strukturiranem polju,
-    zato je davčna plačila varneje izvesti prek slovenske banke.
-    Skripta izpiše opozorilo za vsako tako plačilo.
+  * receiverType se določi po Purp in imenu (imena so diakritiko-neodvisna).
+
+Mapiranje SEPA XML (CdtTrfTxInf) -> Wise CSV
+--------------------------------------------
+Zgradba enega plačila v XML:
+  PmtInf/CdtTrfTxInf
+    Amt/InstdAmt (Ccy="EUR")              -> znesek in valuta
+    Cdtr/Nm                               -> ime prejemnika
+    CdtrAcct/Id/IBAN                      -> IBAN
+    Purp/Cd                               -> koda namena (za ugibanje tipa)
+    RmtInf/Strd/CdtrRefInf/Ref            -> sklic / referenca (strukturirano)
+    RmtInf/Strd/AddtlRmtInf               -> prosto besedilo (opis)
+  (EndToEndId, ChrgBr, CdtrAgt/BIC, PstlAdr — se NE uporabljajo)
+
+  Wise stolpec       Vir v XML                              Vrsta
+  -----------------  -------------------------------------  ----------------
+  name               Cdtr/Nm                                neposredno (whitespace)
+  recipientEmail     — (ni v XML)                           vedno prazno
+  paymentReference   Ref ali AddtlRmtInf (odvisno od tipa)  IZRAČUNANO (glej build_references)
+  referenceNumber    CdtrRefInf/Ref                         neposredno (strukturiran sklic)
+  receiverType       — (ni v XML)                           IZRAČUNANO (glej receiver_type)
+  amountCurrency     — (konstanta)                          vedno "target"
+  amount             Amt/InstdAmt                           neposredno
+  sourceCurrency     Amt/InstdAmt/@Ccy                      neposredno
+  targetCurrency     Amt/InstdAmt/@Ccy                      neposredno
+  IBAN               CdtrAcct/Id/IBAN                       neposredno
+
+Izračunani polji (ni neposredne kopije enega taga):
+  * receiverType  — v SEPA XML ni polja fizična/pravna oseba. Ugibamo iz Purp/Cd
+                    in besedila imena (glej receiver_type()).
+  * paymentReference / referenceNumber — oba izhajata iz RmtInf/Strd
+                    (Ref = sklic, AddtlRmtInf = opis). Razporeditev v build_references().
 """
 
 import csv
 import re
 import sys
+import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # ---- Razvrstitev vrste prejemnika -------------------------------------------
-# Purp kode, ki nedvoumno pomenijo podjetje/institucijo:
-BUSINESS_PURP = {"TAXS", "SUPP", "VATX", "GOVT", "SSBE"}
-# Purp kode fizičnih oseb (plača, nadomestila, povračila):
+BUSINESS_PURP = {"TAXS", "SUPP", "VATX", "GOVT", "SSBE", "LBRI"}
 PERSON_PURP = {"SALA", "PRCP", "REFU", "BONU", "PENS"}
-# Znaki podjetja/institucije v imenu prejemnika:
+# Znaki podjetja/institucije v imenu (primerjamo na obliki BREZ diakritike):
 BUSINESS_NAME_RE = re.compile(
     r"\b(d\.?o\.?o\.?|d\.?d\.?|s\.?p\.?|PODRACUN|PRORACUN|ZZZS|ZPIZ|FURS|"
     r"DAVCNI|ACCOUNTING|d\.n\.o\.|k\.d\.)\b",
     re.IGNORECASE,
 )
 
-# Model slovenskega sklica: SI + 2 številki (SI00, SI11, SI19, SI99, ...).
-SI_MODEL_RE = re.compile(r"^SI\d{2}")
+# Slovenski model + številka sklica: SI<2 številki><preostanek>.
+SI_STRUCTURED_RE = re.compile(r"^SI(\d{2})(.+)$")
+# ISO 11649 kreditna referenca (realna, ne kratek nadomestek kot 'RF040'):
+RF_STRUCTURED_RE = re.compile(r"^RF\d{2}.{3,}$")
+# Model 19 = davki/prispevki (FURS: sklic brez besedila in brez presledkov).
+TAX_MODELS = {"19"}
+
+
+def fold(s: str) -> str:
+    """Odstrani diakritiko: 'PODRAČUN' -> 'PODRACUN'."""
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", s or "") if not unicodedata.combining(c)
+    )
 
 
 def strip_ns(tag: str) -> str:
-    """Odstrani namespace: '{urn:...}Nm' -> 'Nm'."""
     return tag.split("}", 1)[-1] if "}" in tag else tag
 
 
 def find(el, path):
-    """Iskanje po lokalnih imenih oznak, brez upoštevanja namespace."""
     cur = [el]
     for part in path.split("/"):
         nxt = []
@@ -73,45 +117,57 @@ def text(el, path, default=""):
     return node.text.strip() if node is not None and node.text else default
 
 
-def format_reference(ref: str, addtl: str) -> tuple[str, bool]:
+def build_references(ref: str, addtl: str):
     """
-    Vrne (referenca_za_Wise, je_obvezen_sklic).
+    Vrne (paymentReference, referenceNumber, je_davcni_sklic).
 
-    Če je ref slovenski model SIxx (sklic za davke/račune) — ga ohranimo
-    kot 'SIxx preostanek' (obvezni sklic). Sicer vzamemo besedilni opis
-    (AddtlRmtInf), če ga ni pa sam ref.
+    - Davčni sklic (model SI19): sklic gre v OBA polja (referenceNumber IN
+      paymentReference), oba brez presledkov in brez dodatnega besedila —
+      ker vnaprej ne vemo, katero polje Wise posreduje naprej FURS-u.
+    - Drug strukturiran sklic (SI00/SI01/SI11..., RF...): referenceNumber = ref,
+      paymentReference = opis (AddtlRmtInf).
+    - Model SI99 ali nadomestek (RF040) ali brez sklica: referenceNumber = "",
+      paymentReference = opis (npr. 'Placa (7/26) ...').
     """
     ref = (ref or "").strip()
     addtl = (addtl or "").strip()
-    if SI_MODEL_RE.match(ref):
-        model, rest = ref[:4], ref[4:]
-        formatted = f"{model} {rest}".strip()
-        return formatted, True
-    # RF040 in podobni kratki nadomestki ne nosijo koristne informacije —
-    # zato imamo raje človeku berljiv namen plačila.
-    if addtl:
-        return addtl, False
-    return ref, False
+
+    m = SI_STRUCTURED_RE.match(ref)
+    if m and m.group(1) != "99":
+        model = m.group(1)
+        if model in TAX_MODELS:
+            return ref, ref, True          # davek: sklic v obeh poljih
+        return addtl, ref, False          # npr. račun dobavitelja (SI00)
+
+    if RF_STRUCTURED_RE.match(ref):
+        return addtl, ref, False
+
+    # SI99 / RF040 / prazno — ni strukturiranega sklica.
+    return (addtl or ref), "", False
 
 
 def receiver_type(name: str, purp: str) -> str:
     purp = (purp or "").upper()
     if purp in BUSINESS_PURP:
         return "BUSINESS"
-    if BUSINESS_NAME_RE.search(name or ""):
+    if BUSINESS_NAME_RE.search(fold(name)):
         return "BUSINESS"
     if purp in PERSON_PURP:
         return "PERSON"
-    # Privzeto — PERSON (varneje za plačilne datoteke plač).
     return "PERSON"
+
+
+FIELDS = [
+    "name", "recipientEmail", "paymentReference", "referenceNumber", "receiverType",
+    "amountCurrency", "amount", "sourceCurrency", "targetCurrency", "IBAN",
+]
 
 
 def convert(xml_path: Path):
     tree = ET.parse(xml_path)
     root = tree.getroot()
 
-    rows = []
-    warnings = []
+    rows, sklici = [], []
     total = 0.0
 
     for pmtinf in root.iter():
@@ -121,8 +177,7 @@ def convert(xml_path: Path):
             if strip_ns(tx.tag) != "CdtTrfTxInf":
                 continue
 
-            name = text(tx, "Cdtr/Nm")
-            name = re.sub(r"\s+", " ", name).strip()  # odstrani dvojne presledke
+            name = re.sub(r"\s+", " ", text(tx, "Cdtr/Nm")).strip()
             iban = text(tx, "CdtrAcct/Id/IBAN").replace(" ", "")
             amt_node = find(tx, "Amt/InstdAmt")
             amount = amt_node.text.strip() if amt_node is not None else "0"
@@ -131,47 +186,35 @@ def convert(xml_path: Path):
             ref = text(tx, "RmtInf/Strd/CdtrRefInf/Ref")
             addtl = text(tx, "RmtInf/Strd/AddtlRmtInf")
 
-            reference, mandatory = format_reference(ref, addtl)
+            pay_ref, ref_num, is_tax = build_references(ref, addtl)
             rtype = receiver_type(name, purp)
 
-            rows.append(
-                {
-                    "name": name,
-                    "recipientEmail": "",
-                    "paymentReference": reference,
-                    "receiverType": rtype,
-                    "amountCurrency": "target",
-                    "amount": amount,
-                    "sourceCurrency": ccy,
-                    "targetCurrency": ccy,
-                    "IBAN": iban,
-                }
-            )
+            rows.append({
+                "name": name,
+                "recipientEmail": "",
+                "paymentReference": pay_ref,
+                "referenceNumber": ref_num,
+                "receiverType": rtype,
+                "amountCurrency": "target",
+                "amount": amount,
+                "sourceCurrency": ccy,
+                "targetCurrency": ccy,
+                "IBAN": iban,
+            })
             try:
                 total += float(amount)
             except ValueError:
                 pass
+            if is_tax:
+                sklici.append(f"  {name}: {ref_num}")
 
-            if mandatory:
-                warnings.append(
-                    f"  [sklic] {name}: referenca '{reference}' — "
-                    f"obvezni davčni sklic se prenaša kot nestrukturirano besedilo"
-                )
-
-    # Kontrolna vsota iz GrpHdr, če obstaja.
     ctrl = None
     for el in root.iter():
         if strip_ns(el.tag) == "CtrlSum" and el.text:
             ctrl = el.text.strip()
             break
 
-    return rows, warnings, total, ctrl
-
-
-FIELDS = [
-    "name", "recipientEmail", "paymentReference", "receiverType",
-    "amountCurrency", "amount", "sourceCurrency", "targetCurrency", "IBAN",
-]
+    return rows, sklici, total, ctrl
 
 
 def write_csv(rows, out_path: Path):
@@ -187,7 +230,6 @@ def main(argv):
         print(__doc__)
         return 1
 
-    # Če sta natanko dva argumenta in se drugi konča na .csv — je to izhod.
     explicit_out = None
     if len(args) == 2 and args[1].lower().endswith(".csv"):
         explicit_out = Path(args[1])
@@ -199,24 +241,22 @@ def main(argv):
             print(f"NAPAKA: datoteka ni najdena — {xml_path}", file=sys.stderr)
             continue
 
-        rows, warnings, total, ctrl = convert(xml_path)
+        rows, sklici, total, ctrl = convert(xml_path)
         out_path = explicit_out or xml_path.with_name(xml_path.stem + "-wise.csv")
         write_csv(rows, out_path)
 
         print(f"\n{xml_path.name} -> {out_path.name}")
-        print(f"  plačil: {len(rows)}   vsota: {total:.2f} {rows[0]['sourceCurrency'] if rows else ''}")
+        cur = rows[0]["sourceCurrency"] if rows else ""
+        print(f"  plačil: {len(rows)}   vsota: {total:.2f} {cur}")
         if ctrl is not None:
             ok = abs(total - float(ctrl)) < 0.005
             print(f"  CtrlSum:  {ctrl}   {'✓ ujema se' if ok else '✗ ODSTOPANJE!'}")
-        # Vrstice brez IBAN ali brez reference — možne težave.
         for i, r in enumerate(rows, 1):
             if not r["IBAN"]:
                 print(f"  ⚠ vrstica {i} ({r['name']}): prazen IBAN")
-            if not r["paymentReference"]:
-                print(f"  ⚠ vrstica {i} ({r['name']}): prazna referenca")
-        if warnings:
-            print("  Pozor — davčni sklici (preverite razporeditev / plačajte prek slovenske banke):")
-            print("\n".join(warnings))
+        if sklici:
+            print("  Davčni sklici (model 19) → stolpec referenceNumber, brez presledkov:")
+            print("\n".join(sklici))
 
     return 0
 
