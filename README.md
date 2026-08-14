@@ -115,4 +115,4 @@ Egor Zyryanov, **Setronica d.o.o.** — contact@setronica.si
 
 ## License
 
-MIT (suggested) — add a `LICENSE` file to make reuse terms explicit.
+[MIT](./LICENSE) — © 2026 Setronica d.o.o. Free and open source.
