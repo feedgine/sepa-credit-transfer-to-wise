@@ -44,17 +44,14 @@ name,recipientEmail,paymentReference,referenceNumber,receiverType,amountCurrency
 The Slovenian tax authority (FURS) requires the tax reference **without spaces and
 without extra text**, in the dedicated reference field. So:
 
-- **Tax model SI19** → the reference (verbatim, no space after the model, e.g.
-  `SI1931631053-40002`) is written to **both** `referenceNumber` and
-  `paymentReference`. We don't know in advance which field Wise forwards to the
-  Slovenian banking system, so putting the clean `sklic` in both maximises the
-  chance FURS can allocate the payment automatically. Since the value carries no
-  extra text, duplicating it does not violate FURS's "no text before the reference"
-  rule.
-- **Any other SI reference** — a real structured one (SI00/SI01/SI11…) **or**
-  model **SI99** ("no reference" in Slovenian) → passed through verbatim to
-  `referenceNumber` (source fidelity), `paymentReference` keeps the description
-  (e.g. an invoice note or `Placa (7/26) …`).
+- **Any SI reference** (SI19 tax, SI00 invoice, SI99 "no reference", …):
+  `referenceNumber` = the clean structured reference from `Ref` (no spaces), and
+  `paymentReference` = `AddtlRmtInf`. Minimax writes `AddtlRmtInf` as
+  `<reference> <description>` — the reference first (no internal spaces) with any
+  text after it — which is exactly the form FURS permits. This way **both** fields
+  carry the reference (we don't know which one Wise forwards to the Slovenian
+  banking system), while the human description is preserved. If `AddtlRmtInf` is
+  empty, `Ref` is used.
 - **Real RF reference** (RF + check digits + number) → `referenceNumber` gets it,
   `paymentReference` keeps the description.
 - **Placeholder `RF040` / none** → `referenceNumber` empty, `paymentReference`

@@ -146,9 +146,8 @@ function buildReferences(ref, addtl){
   ref = (ref||"").trim(); addtl = (addtl||"").trim();
   const m = SI_STRUCTURED_RE.exec(ref);
   if (m){
-    if (TAX_MODELS.has(m[1])) return { pay:ref, num:ref, tax:true };
-    // SI99 ("brez sklica") in ostali SI-sklici → ref v referenceNumber
-    return { pay:addtl, num:ref, tax:false };
+    // num = čist sklic (Ref); pay = AddtlRmtInf ("<sklic> <opis>"), sicer Ref.
+    return { pay:(addtl||ref), num:ref, tax:TAX_MODELS.has(m[1]) };
   }
   if (RF_STRUCTURED_RE.test(ref)) return { pay:addtl, num:ref, tax:false };  // realen RF
   return { pay:(addtl||ref), num:"", tax:false };  // RF040 / prazno

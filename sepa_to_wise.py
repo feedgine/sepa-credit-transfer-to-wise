@@ -122,13 +122,13 @@ def build_references(ref: str, addtl: str):
     """
     Vrne (paymentReference, referenceNumber, je_davcni_sklic).
 
-    - Davčni sklic (model SI19): sklic gre v OBA polja (referenceNumber IN
-      paymentReference), oba brez presledkov in brez dodatnega besedila —
-      ker vnaprej ne vemo, katero polje Wise posreduje naprej FURS-u.
-    - Vsak SI-sklic (SI99 = "brez sklica", SI00/SI01/... = strukturiran):
-      referenceNumber = ref verbatim (zvestoba viru iz Minimaxa),
-      paymentReference = opis (AddtlRmtInf).
-    - Realen RF sklic (RF + kontrolni + številka): referenceNumber = ref,
+    - Vsak SI-sklic (SI19 davek, SI00 račun, SI99 "brez sklica", ...):
+        referenceNumber = Ref  — čist strukturiran sklic (brez presledkov),
+        paymentReference = AddtlRmtInf — Minimax ga zapiše kot "<sklic> <opis>"
+          (sklic spredaj brez presledkov, opis za njim), kar je skladno s FURS.
+      Če AddtlRmtInf ni, uporabimo Ref. Tako OBA polja nosita sklic (ne vemo,
+      katero Wise posreduje naprej), opis pa ostane ohranjen.
+    - Realen RF sklic (RF + kontrolni + številka): referenceNumber = Ref,
       paymentReference = opis.
     - Nadomestek 'RF040' / prazno / drugo: referenceNumber = "",
       paymentReference = opis (npr. 'Placa (7/26) ...').
@@ -138,10 +138,8 @@ def build_references(ref: str, addtl: str):
 
     m = SI_STRUCTURED_RE.match(ref)
     if m:
-        if m.group(1) in TAX_MODELS:
-            return ref, ref, True          # davek (SI19): sklic v obeh poljih
-        # SI99 in ostali SI-sklici: ref v referenceNumber (zvestoba viru)
-        return addtl, ref, False
+        # num = čist sklic; pay = AddtlRmtInf ("<sklic> <opis>"), sicer Ref.
+        return (addtl or ref), ref, (m.group(1) in TAX_MODELS)
 
     if RF_STRUCTURED_RE.match(ref):        # realen RF (ne kratek 'RF040')
         return addtl, ref, False
