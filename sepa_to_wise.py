@@ -191,10 +191,12 @@ def convert(xml_path: Path):
             pay_ref, ref_num, is_tax = build_references(ref, addtl)
             rtype = receiver_type(name, purp)
 
+            # Izhod v SEPA-varen ASCII (SWIFT nabor): imena in opisi brez
+            # diakritike (č->c, ž->z, š->s). Sklic v referenceNumber je že ASCII.
             rows.append({
-                "name": name,
+                "name": fold(name),
                 "recipientEmail": "",
-                "paymentReference": pay_ref,
+                "paymentReference": fold(pay_ref),
                 "referenceNumber": ref_num,
                 "receiverType": rtype,
                 "amountCurrency": "target",

@@ -97,8 +97,11 @@ flagging any mismatch, and list the tax references written to `referenceNumber`.
   may reject the row — check recipient details separately.
 - Company recipients are exported as **Business** (names with digits, e.g.
   `GP 90, d.o.o.`, are rejected under the Person type in Wise).
-- Descriptions from the accounting program are passed through verbatim (including
-  any double spaces) — the source data is not "cleaned".
+- **`name` and `paymentReference` are transliterated to ASCII** (č→c, ž→z, š→s, …)
+  so the output stays within the SEPA-safe basic Latin (SWIFT) character set;
+  diacritics are outside the guaranteed SEPA set and may be altered downstream. The
+  `sklic` in `referenceNumber` is already ASCII and is left untouched. Other text
+  (e.g. double spaces from the accounting program) is otherwise preserved.
 
 ## Privacy
 

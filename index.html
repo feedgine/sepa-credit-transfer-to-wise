@@ -182,7 +182,9 @@ function convert(xmlText){
     const { pay, num, tax } = buildReferences(ref, addtl);
     const rtype = receiverType(name, purp);
 
-    rows.push({ name, recipientEmail:"", paymentReference:pay, referenceNumber:num,
+    // Izhod v SEPA-varen ASCII (SWIFT nabor): imena in opisi brez diakritike
+    // (č->c, ž->z, š->s). Sklic v referenceNumber je že ASCII.
+    rows.push({ name:fold(name), recipientEmail:"", paymentReference:fold(pay), referenceNumber:num,
                 receiverType:rtype, amountCurrency:"target", amount,
                 sourceCurrency:ccy, targetCurrency:ccy, IBAN:iban });
     const v = parseFloat(amount); if (!isNaN(v)) total += v;
